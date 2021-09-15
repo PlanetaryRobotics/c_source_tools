@@ -97,6 +97,7 @@ from functools import reduce
 # import importlib.util
 import sys
 
+issues_list = []
 
 def normalise_path_to_unix(path):
     path = path.replace('\\', '/')
@@ -132,7 +133,8 @@ def make_cmake_includes_paths_list(filepath, paths, lib_name, addsubdir=True, ad
     text_lib_name = """#adding entries for {}\n"""
     text_inc = '\tinclude_directories("${{PROJECT_SOURCE_DIR}}/{}")\n'
     text_sub = '\tsubdirs("${{PROJECT_SOURCE_DIR}}/{}")\n'
-    text_add_lib = '\tadd_library({} "")\n'
+    text_add_lib = '\tadd_library({0} "")\n'
+    text_add_target_properties = '\tset_target_properties({} PROPERTIES LINKER_LANGUAGE C)\n'
     # {0} = name, {1} = flags
     text_add_lib_flags = '\ttarget_compile_definitions({} \n\t\tPRIVATE {}\n\t)\n'
 
@@ -143,6 +145,7 @@ def make_cmake_includes_paths_list(filepath, paths, lib_name, addsubdir=True, ad
             f.write(text_inc.format(path))
         if True is addlib:
             f.write(text_add_lib.format(lib_name))
+            f.write(text_add_target_properties.format(lib_name))
             if folder_flags is not None:
                 f.write(text_add_lib_flags.format(lib_name, folder_flags))
         if True is addsubdir:
@@ -173,10 +176,10 @@ def make_cmake_includes_for_third_party_libs(args):
             includes_file_name, paths, lib_name, addsubdir=False, addlib=False)
 
 
-def make_cmake_lists_for_lib(prefix, suffix, filepath, files_list, source_exts=['.c', '.S']):
+def make_cmake_lists_for_lib(prefix, suffix, filepath, files_list, source_exts=['.c', '.S'],visibility="PUBLIC"):
     text = """
 target_sources({0}
-                PUBLIC
+                {3}
 {2}
             )
 """
@@ -193,7 +196,7 @@ target_sources({0}
         lines = reduce((lambda x, y: x + y), files_list_to_write)
 
         with open(filepath, "w") as f:
-            f.write(text.format(prefix, suffix, lines))
+            f.write(text.format(prefix, suffix, lines,visibility))
 
 
 def make_cmake_lists_forfolder(args):
@@ -217,14 +220,14 @@ def make_cmake_lists_forfolder(args):
         make_cmake_includes_paths_list(
             includes_file_name, paths, pre, folder_flags=folder_flags)
         for path in files_list.keys():  # prepare CmakeLists for the library
-            file_path = os.path.join(path, 'CmakeLists.txt')
+            file_path = os.path.join(path, 'CMakeLists.txt')
             try:
                 os.remove(file_path)
             except:
                 """file doesnt exist"""
                 pass
             make_cmake_lists_for_lib(
-                pre, suf, file_path, files_list[path], args['sources'])
+                pre, suf, file_path, files_list[path], args['sources'],args["CMAKE_SOURCE_PROPERTY"])
 
     except Exception as e:
         traceback.print_exc()
@@ -235,6 +238,7 @@ def make_cmake_lists_forfolder(args):
 
 def make_generate_cmake_project_includes(default_args):
     args = default_args
+    target_add_source_default = "PUBLIC"
     includes_file_name = os.path.join(args['root'], args['CmakeIncludes'])
     with open(includes_file_name, "w") as f:
         f.write("")
@@ -246,19 +250,53 @@ def make_generate_cmake_project_includes(default_args):
             sub = sub_list[0]
             if len(sub_list) > 1:
                 sub = sub_list[0]
-                args["current_folder_flags"] = sub_list[1]
+                args["current_folder_flags"] = ""
+                for token in sub_list:
+                    if "-D" in token:
+                        args["current_folder_flags"] += token
+                    if "CMAKE_SOURCE_PROPERTY" in token:
+                        try:
+                            flag  = token.split(":")[1]
+                            if flag in ["PUBLIC","PRIVATE"]:
+                                args["CMAKE_SOURCE_PROPERTY"] = flag
+                            else:
+                                args["CMAKE_SOURCE_PROPERTY"] = "PUBLIC"
+                                issue = "{} : token {} is not in format CMAKE_SOURCE_PROPERTY:PUBLIC/PRIVATE, setting to PUBLIC".format(sub,token)
+                                issues_list.append(issue)
+                                print(issue)
+                        except Exception as e:
+                            print("token {} is not in format CMAKE_SOURCE_PROPERTY:PUBLIC/PRIVATE")
+                            raise e
+                
             else:
                 sub = sub_list[0]
                 args["current_folder_flags"] = None
+            # Failsafes
+            if "current_folder_flags" not in args.keys():
+                args["current_folder_flags"] = None
+            if "CMAKE_SOURCE_PROPERTY" not in args.keys():
+                if 'target_add_source_default' in args.keys():
+                    target_add_source_default = args['target_add_source_default']
+                if target_add_source_default in ["PUBLIC","PRIVATE"]:
+                    args["CMAKE_SOURCE_PROPERTY"] = target_add_source_default
+                else:
+                    print("token {} is not in format CMAKE_SOURCE_PROPERTY:PUBLIC/PRIVATE, setting to PUBLIC",target_add_source_default)
+                    target_add_source_default = "PUBLIC"
+            
             args['prefix'] = sub.replace('\\', '/').replace('/', '_')
             libs_dep_list = libs_dep_list + '\n\t' + (args['prefix'])
             args['current_folder'] = os.path.join(args['root'], sub)
             make_cmake_lists_forfolder(args)
 
-    text_lib_dependencies = """\ntarget_link_libraries (${{PROJECT_NAME}}.elf\n\t{}\n)"""
+    text_lib_dependencies = """\ntarget_link_libraries (${{PROJECT_NAME}}.${{BUILD_EXT}}\n\t{}\n)"""
     print('Adding the following libs as dependencies -->\n\n{}\n\n\tinto {}\n\nThis Should link all your sources specified.\nEnjoy\n--<Abhinav Tripathi>"mr.a.tripathi@gmail.com"'.format(libs_dep_list, includes_file_name))
     with open(includes_file_name, "a+") as f:
         f.write(text_lib_dependencies.format(libs_dep_list))
+    if len(issues_list) > 0:
+        print('{} Issue(s) / Warning(s) Found\n--<Listed Below>--\n'.format(len(issues_list)))
+        issue_no = 1
+        for issue in issues_list:
+            print('\t{}: {}'.format(issue_no,issue))
 
 
 def main(args_file_name, subfolders=None, path=None):
